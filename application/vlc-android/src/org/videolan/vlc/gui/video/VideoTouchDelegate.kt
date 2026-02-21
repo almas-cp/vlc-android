@@ -131,11 +131,6 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
     // Freeform pinch-to-zoom state
     var currentZoom = DEFAULT_ZOOM
         private set
-    private var panX = 0f
-    private var panY = 0f
-    private var isPanning = false
-    private var lastPanX = 0f
-    private var lastPanY = 0f
     private val surfaceFrame: FrameLayout? get() = player.videoLayout?.findViewById(R.id.player_surface_frame)
 
     // Brightness
@@ -207,10 +202,6 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         touchAction = TOUCH_NONE
                         // Seek
                         touchX = event.x
-                        // Pan initialization for zoomed state
-                        lastPanX = event.x
-                        lastPanY = event.y
-                        isPanning = false
                         // Mouse events for the core
                         player.sendMouseEvent(MotionEvent.ACTION_DOWN, xTouch, yTouch)
                         val fastPlayRunnable = Runnable {
@@ -229,27 +220,6 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         if ((touchControls and TOUCH_FLAG_SCREENSHOT == TOUCH_FLAG_SCREENSHOT) && event.pointerCount == 3 && touchAction != TOUCH_FASTPLAY) touchAction = TOUCH_SCREENSHOT
                         if (touchAction == TOUCH_IGNORE || touchAction == TOUCH_FASTPLAY) return false
                         if (touchAction == TOUCH_SCALE) return false
-
-                        // Pan when zoomed in (single finger only)
-                        // Use > 1.1f threshold so tiny accidental pinches don't block seek
-                        if (currentZoom > 1.1f && event.pointerCount == 1 && !scaleGestureDetector.isInProgress) {
-                            val dx = event.x - lastPanX
-                            val dy = event.y - lastPanY
-                            val touchSlop = ViewConfiguration.get(player).scaledTouchSlop
-                            if (isPanning || (dx.absoluteValue > touchSlop || dy.absoluteValue > touchSlop)) {
-                                if (!isPanning) {
-                                    isPanning = true
-                                    touchAction = TOUCH_IGNORE
-                                }
-                                panX += dx
-                                panY += dy
-                                clampPan()
-                                applyZoomTransform()
-                                lastPanX = event.x
-                                lastPanY = event.y
-                                return true
-                            }
-                        }
 
                         // Mouse events for the core
                         player.sendMouseEvent(MotionEvent.ACTION_MOVE, xTouch, yTouch)
@@ -283,12 +253,6 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         }
                     }
                     MotionEvent.ACTION_UP -> {
-                        // End panning
-                        if (isPanning) {
-                            isPanning = false
-                            touchAction = TOUCH_NONE
-                            return true
-                        }
                         // End scale gesture — consume event and reset touch coords
                         // to prevent stale positions from triggering seek
                         if (touchAction == TOUCH_SCALE) {
@@ -567,7 +531,6 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
 
             // Freeform zoom for non-360 video
             currentZoom = (currentZoom * detector.scaleFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
-            clampPan()
             applyZoomTransform()
 
             // Show zoom percentage
@@ -590,7 +553,7 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
     }
 
     /**
-     * Apply current zoom and pan transforms to the video surface frame
+     * Apply current zoom transform to the video surface frame
      */
     private fun applyZoomTransform() {
         surfaceFrame?.let { frame ->
@@ -599,35 +562,14 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
             frame.pivotY = frame.height / 2f
             frame.scaleX = currentZoom
             frame.scaleY = currentZoom
-            frame.translationX = panX
-            frame.translationY = panY
         }
     }
 
     /**
-     * Clamp pan values so the video doesn't scroll completely off-screen
-     */
-    private fun clampPan() {
-        surfaceFrame?.let { frame ->
-            if (currentZoom <= DEFAULT_ZOOM) {
-                panX = 0f
-                panY = 0f
-                return
-            }
-            val maxPanX = (frame.width * (currentZoom - 1f)) / 2f
-            val maxPanY = (frame.height * (currentZoom - 1f)) / 2f
-            panX = panX.coerceIn(-maxPanX, maxPanX)
-            panY = panY.coerceIn(-maxPanY, maxPanY)
-        }
-    }
-
-    /**
-     * Reset zoom to default (100%) and clear panning
+     * Reset zoom to default (100%)
      */
     fun resetZoom() {
         currentZoom = DEFAULT_ZOOM
-        panX = 0f
-        panY = 0f
         applyZoomTransform()
     }
 
