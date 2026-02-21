@@ -288,9 +288,14 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                             touchAction = TOUCH_NONE
                             return true
                         }
-                        // End scale gesture
+                        // End scale gesture — consume event and reset touch coords
+                        // to prevent stale positions from triggering seek
                         if (touchAction == TOUCH_SCALE) {
                             touchAction = TOUCH_NONE
+                            touchX = -1f
+                            touchY = -1f
+                            initTouchX = event.x
+                            initTouchY = event.y
                             return true
                         }
                         // FastPlay
@@ -349,15 +354,7 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                             when {
                                 (touchControls and TOUCH_FLAG_DOUBLE_TAP_SEEK != 0) && event.x < range / 4f -> seekDelta(-org.videolan.tools.Settings.videoDoubleTapJumpDelay * 1000)
                                 (touchControls and TOUCH_FLAG_DOUBLE_TAP_SEEK != 0) && event.x > range * 0.75 -> seekDelta(org.videolan.tools.Settings.videoDoubleTapJumpDelay * 1000)
-                                else -> {
-                                    // If zoomed in, double-tap center resets zoom
-                                    if (currentZoom > 1.05f) {
-                                        resetZoom()
-                                        player.overlayDelegate.showInfo("Zoom: 100%", 1000)
-                                    } else if (touchControls and TOUCH_FLAG_PLAY != 0) {
-                                        player.doPlayPause()
-                                    }
-                                }
+                                else -> if (touchControls and TOUCH_FLAG_PLAY != 0) player.doPlayPause()
                             }
                         }
 
@@ -581,12 +578,13 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
         override fun onScaleEnd(detector: ScaleGestureDetector) {
             if (player.fov != 0f || player.isLocked) return
             if (touchControls and TOUCH_FLAG_SCALE != TOUCH_FLAG_SCALE) return
-            touchAction = TOUCH_NONE
+            // Keep TOUCH_SCALE so ACTION_UP properly consumes the event
+            // (prevents accidental seek trigger after pinch)
+            touchAction = TOUCH_SCALE
 
-            // If zoom is very close to 100%, snap back
-            if (currentZoom in 0.95f..1.05f) {
-                resetZoom()
-            }
+            // Immediately hide zoom info overlay (no fade delay)
+            player.handler.removeMessages(VideoPlayerActivity.FADE_OUT_INFO)
+            player.overlayDelegate.fadeOutInfo(player.overlayDelegate.overlayInfo)
         }
     }
 
@@ -595,6 +593,9 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
      */
     private fun applyZoomTransform() {
         surfaceFrame?.let { frame ->
+            // Ensure zoom is anchored to the center of the frame
+            frame.pivotX = frame.width / 2f
+            frame.pivotY = frame.height / 2f
             frame.scaleX = currentZoom
             frame.scaleY = currentZoom
             frame.translationX = panX
