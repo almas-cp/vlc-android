@@ -167,6 +167,8 @@ class VideoPlayerResizeDelegate(private val player: VideoPlayerActivity) {
      * @param scale the new aspect ratio
      */
     fun setVideoScale(scale: MediaPlayer.ScaleType) = player.service?.run {
+        // Reset any freeform zoom when setting a preset scale
+        player.touchDelegate.resetZoom()
         mediaplayer.videoScale = scale
         when (scale) {
             MediaPlayer.ScaleType.SURFACE_BEST_FIT -> overlayDelegate.showInfo(R.string.surface_best_fit, 1000, R.string.resize_tip)

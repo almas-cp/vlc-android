@@ -61,9 +61,14 @@ private const val TOUCH_TAP_SEEK = 4
 private const val TOUCH_IGNORE = 5
 private const val TOUCH_SCREENSHOT = 6
 private const val TOUCH_FASTPLAY = 7
+private const val TOUCH_SCALE = 8
 
 private const val MIN_FOV = 20f
 private const val MAX_FOV = 150f
+// Pinch-to-zoom limits
+private const val MIN_ZOOM = 0.25f
+private const val MAX_ZOOM = 4.0f
+private const val DEFAULT_ZOOM = 1.0f
 //stick event
 private const val JOYSTICK_INPUT_DELAY = 300
 
@@ -123,6 +128,16 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
         ScaleGestureDetector(player, mScaleListener).apply { ScaleGestureDetectorCompat.setQuickScaleEnabled(this, false) }
     }
 
+    // Freeform pinch-to-zoom state
+    var currentZoom = DEFAULT_ZOOM
+        private set
+    private var panX = 0f
+    private var panY = 0f
+    private var isPanning = false
+    private var lastPanX = 0f
+    private var lastPanY = 0f
+    private val surfaceFrame: FrameLayout? get() = player.videoLayout?.findViewById(R.id.player_surface_frame)
+
     // Brightness
     private var isFirstBrightnessGesture = true
 
@@ -148,7 +163,7 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                 if (!player.isLocked && touchAction != TOUCH_FASTPLAY) {
                     scaleGestureDetector.onTouchEvent(event)
                     if (scaleGestureDetector.isInProgress) {
-                        touchAction = TOUCH_IGNORE
+                        touchAction = TOUCH_SCALE
                         return true
                     }
                 }
@@ -192,6 +207,10 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         touchAction = TOUCH_NONE
                         // Seek
                         touchX = event.x
+                        // Pan initialization for zoomed state
+                        lastPanX = event.x
+                        lastPanY = event.y
+                        isPanning = false
                         // Mouse events for the core
                         player.sendMouseEvent(MotionEvent.ACTION_DOWN, xTouch, yTouch)
                         val fastPlayRunnable = Runnable {
@@ -209,6 +228,28 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                     MotionEvent.ACTION_MOVE -> {
                         if ((touchControls and TOUCH_FLAG_SCREENSHOT == TOUCH_FLAG_SCREENSHOT) && event.pointerCount == 3 && touchAction != TOUCH_FASTPLAY) touchAction = TOUCH_SCREENSHOT
                         if (touchAction == TOUCH_IGNORE || touchAction == TOUCH_FASTPLAY) return false
+                        if (touchAction == TOUCH_SCALE) return false
+
+                        // Pan when zoomed in (single finger only)
+                        if (currentZoom > DEFAULT_ZOOM && event.pointerCount == 1 && !scaleGestureDetector.isInProgress) {
+                            val dx = event.x - lastPanX
+                            val dy = event.y - lastPanY
+                            val touchSlop = ViewConfiguration.get(player).scaledTouchSlop
+                            if (isPanning || (dx.absoluteValue > touchSlop || dy.absoluteValue > touchSlop)) {
+                                if (!isPanning) {
+                                    isPanning = true
+                                    touchAction = TOUCH_IGNORE
+                                }
+                                panX += dx
+                                panY += dy
+                                clampPan()
+                                applyZoomTransform()
+                                lastPanX = event.x
+                                lastPanY = event.y
+                                return true
+                            }
+                        }
+
                         // Mouse events for the core
                         player.sendMouseEvent(MotionEvent.ACTION_MOVE, xTouch, yTouch)
 
@@ -241,6 +282,17 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         }
                     }
                     MotionEvent.ACTION_UP -> {
+                        // End panning
+                        if (isPanning) {
+                            isPanning = false
+                            touchAction = TOUCH_NONE
+                            return true
+                        }
+                        // End scale gesture
+                        if (touchAction == TOUCH_SCALE) {
+                            touchAction = TOUCH_NONE
+                            return true
+                        }
                         // FastPlay
                         if (touchAction == TOUCH_FASTPLAY) {
                             player.overlayDelegate.hideOverlay(false)
@@ -297,7 +349,15 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                             when {
                                 (touchControls and TOUCH_FLAG_DOUBLE_TAP_SEEK != 0) && event.x < range / 4f -> seekDelta(-org.videolan.tools.Settings.videoDoubleTapJumpDelay * 1000)
                                 (touchControls and TOUCH_FLAG_DOUBLE_TAP_SEEK != 0) && event.x > range * 0.75 -> seekDelta(org.videolan.tools.Settings.videoDoubleTapJumpDelay * 1000)
-                                else -> if (touchControls and TOUCH_FLAG_PLAY != 0) player.doPlayPause()
+                                else -> {
+                                    // If zoomed in, double-tap center resets zoom
+                                    if (currentZoom > 1.05f) {
+                                        resetZoom()
+                                        player.overlayDelegate.showInfo("Zoom: 100%", 1000)
+                                    } else if (touchControls and TOUCH_FLAG_PLAY != 0) {
+                                        player.doPlayPause()
+                                    }
+                                }
                             }
                         }
 
@@ -488,38 +548,85 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
 
     private val mScaleListener = object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
 
-        private var savedScale: MediaPlayer.ScaleType? = null
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             if (touchControls and TOUCH_FLAG_SCALE != TOUCH_FLAG_SCALE) return false
             return screenConfig.xRange != 0 || player.fov == 0f
         }
 
         override fun onScale(detector: ScaleGestureDetector): Boolean {
-            if (player.fov != 0f && !player.isLocked && (touchControls and TOUCH_FLAG_SCALE == TOUCH_FLAG_SCALE)) {
+            if (player.isLocked || touchAction == TOUCH_FASTPLAY) return false
+            if (touchControls and TOUCH_FLAG_SCALE != TOUCH_FLAG_SCALE) return false
+
+            if (player.fov != 0f) {
+                // 360 video: adjust FOV
                 val diff = VideoPlayerActivity.DEFAULT_FOV * (1 - detector.scaleFactor)
                 if (player.updateViewpoint(0f, 0f, diff)) {
                     player.fov = (player.fov + diff).coerceIn(MIN_FOV, MAX_FOV)
                     return true
                 }
+                return false
             }
-            return false
+
+            // Freeform zoom for non-360 video
+            currentZoom = (currentZoom * detector.scaleFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
+            clampPan()
+            applyZoomTransform()
+
+            // Show zoom percentage
+            val zoomPercent = (currentZoom * 100).toInt()
+            player.overlayDelegate.showInfo("Zoom: $zoomPercent%", 1000)
+            return true
         }
 
         override fun onScaleEnd(detector: ScaleGestureDetector) {
-            if (player.fov == 0f && !player.isLocked && (touchControls and TOUCH_FLAG_SCALE == TOUCH_FLAG_SCALE) && touchAction != TOUCH_FASTPLAY) {
-                val grow = detector.scaleFactor > 1.0f
-                if (grow && player.currentScaleType != MediaPlayer.ScaleType.SURFACE_FIT_SCREEN) {
-                    savedScale = player.currentScaleType
-                    resizeDelegate.setVideoScale(MediaPlayer.ScaleType.SURFACE_FIT_SCREEN)
-                } else if (!grow && savedScale != null) {
-                    resizeDelegate.setVideoScale(savedScale!!)
-                    savedScale = null
-                } else if (!grow && player.currentScaleType == MediaPlayer.ScaleType.SURFACE_FIT_SCREEN) {
-                    resizeDelegate.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT)
-                }
-                touchAction = TOUCH_NONE
+            if (player.fov != 0f || player.isLocked) return
+            if (touchControls and TOUCH_FLAG_SCALE != TOUCH_FLAG_SCALE) return
+            touchAction = TOUCH_NONE
+
+            // If zoom is very close to 100%, snap back
+            if (currentZoom in 0.95f..1.05f) {
+                resetZoom()
             }
         }
+    }
+
+    /**
+     * Apply current zoom and pan transforms to the video surface frame
+     */
+    private fun applyZoomTransform() {
+        surfaceFrame?.let { frame ->
+            frame.scaleX = currentZoom
+            frame.scaleY = currentZoom
+            frame.translationX = panX
+            frame.translationY = panY
+        }
+    }
+
+    /**
+     * Clamp pan values so the video doesn't scroll completely off-screen
+     */
+    private fun clampPan() {
+        surfaceFrame?.let { frame ->
+            if (currentZoom <= DEFAULT_ZOOM) {
+                panX = 0f
+                panY = 0f
+                return
+            }
+            val maxPanX = (frame.width * (currentZoom - 1f)) / 2f
+            val maxPanY = (frame.height * (currentZoom - 1f)) / 2f
+            panX = panX.coerceIn(-maxPanX, maxPanX)
+            panY = panY.coerceIn(-maxPanY, maxPanY)
+        }
+    }
+
+    /**
+     * Reset zoom to default (100%) and clear panning
+     */
+    fun resetZoom() {
+        currentZoom = DEFAULT_ZOOM
+        panX = 0f
+        panY = 0f
+        applyZoomTransform()
     }
 
     //Seek
