@@ -231,7 +231,8 @@ class VideoTouchDelegate(private val player: VideoPlayerActivity,
                         if (touchAction == TOUCH_SCALE) return false
 
                         // Pan when zoomed in (single finger only)
-                        if (currentZoom > DEFAULT_ZOOM && event.pointerCount == 1 && !scaleGestureDetector.isInProgress) {
+                        // Use > 1.1f threshold so tiny accidental pinches don't block seek
+                        if (currentZoom > 1.1f && event.pointerCount == 1 && !scaleGestureDetector.isInProgress) {
                             val dx = event.x - lastPanX
                             val dy = event.y - lastPanY
                             val touchSlop = ViewConfiguration.get(player).scaledTouchSlop
